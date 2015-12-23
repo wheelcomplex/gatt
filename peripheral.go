@@ -39,6 +39,10 @@ type Peripheral interface {
 	// ReadCharacteristic retrieves the value of a specified characteristic.
 	ReadCharacteristic(c *Characteristic) ([]byte, error)
 
+	// ReadLongCharacteristic retrieves the value of a specified characteristic that is longer than the
+	// MTU.
+	ReadLongCharacteristic(c *Characteristic) ([]byte, error)
+
 	// ReadDescriptor retrieves the value of a specified characteristic descriptor.
 	ReadDescriptor(d *Descriptor) ([]byte, error)
 
@@ -48,11 +52,17 @@ type Peripheral interface {
 	// WriteDescriptor writes the value of a characteristic descriptor.
 	WriteDescriptor(d *Descriptor, b []byte) error
 
-	// SetNotifyValue sets notifications or indications for the value of a specified characteristic.
+	// SetNotifyValue sets notifications for the value of a specified characteristic.
 	SetNotifyValue(c *Characteristic, f func(*Characteristic, []byte, error)) error
+
+	// SetIndicateValue sets indications for the value of a specified characteristic.
+	SetIndicateValue(c *Characteristic, f func(*Characteristic, []byte, error)) error
 
 	// ReadRSSI retrieves the current RSSI value for the remote peripheral.
 	ReadRSSI() int
+
+	// SetMTU sets the mtu for the remote peripheral.
+	SetMTU(mtu uint16) error
 }
 
 type subscriber struct {

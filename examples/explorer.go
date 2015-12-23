@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/paypal/gatt"
 	"github.com/paypal/gatt/examples/option"
@@ -19,7 +20,7 @@ func onStateChanged(d gatt.Device, s gatt.State) {
 	fmt.Println("State:", s)
 	switch s {
 	case gatt.StatePoweredOn:
-		fmt.Println("Scaning...")
+		fmt.Println("Scanning...")
 		d.Scan([]gatt.UUID{}, false)
 		return
 	default:
@@ -29,7 +30,7 @@ func onStateChanged(d gatt.Device, s gatt.State) {
 
 func onPeriphDiscovered(p gatt.Peripheral, a *gatt.Advertisement, rssi int) {
 	id := strings.ToUpper(flag.Args()[0])
-	if p.ID() != id {
+	if strings.ToUpper(p.ID()) != id {
 		return
 	}
 
@@ -49,6 +50,10 @@ func onPeriphDiscovered(p gatt.Peripheral, a *gatt.Advertisement, rssi int) {
 func onPeriphConnected(p gatt.Peripheral, err error) {
 	fmt.Println("Connected")
 	defer p.Device().CancelConnection(p)
+
+	if err := p.SetMTU(500); err != nil {
+		fmt.Printf("Failed to set MTU, err: %s\n", err)
+	}
 
 	// Discovery services
 	ss, err := p.DiscoverServices(nil)
@@ -111,9 +116,24 @@ func onPeriphConnected(p gatt.Peripheral, err error) {
 				}
 				fmt.Printf("    value         %x | %q\n", b, b)
 			}
+
+			// Subscribe the characteristic, if possible.
+			if (c.Properties() & (gatt.CharNotify | gatt.CharIndicate)) != 0 {
+				f := func(c *gatt.Characteristic, b []byte, err error) {
+					fmt.Printf("notified: % X | %q\n", b, b)
+				}
+				if err := p.SetNotifyValue(c, f); err != nil {
+					fmt.Printf("Failed to subscribe characteristic, err: %s\n", err)
+					continue
+				}
+			}
+
 		}
 		fmt.Println()
 	}
+
+	fmt.Printf("Waiting for 5 seconds to get some notifiations, if any.\n")
+	time.Sleep(5 * time.Second)
 }
 
 func onPeriphDisconnected(p gatt.Peripheral, err error) {
@@ -124,12 +144,12 @@ func onPeriphDisconnected(p gatt.Peripheral, err error) {
 func main() {
 	flag.Parse()
 	if len(flag.Args()) != 1 {
-		fmt.Printf("usage: %s [options] peripheral-id", os.Args[0])
+		log.Fatalf("usage: %s [options] peripheral-id\n", os.Args[0])
 	}
 
 	d, err := gatt.NewDevice(option.DefaultClientOptions...)
 	if err != nil {
-		log.Fatalf("Failed to open device, err: %s", err)
+		log.Fatalf("Failed to open device, err: %s\n", err)
 		return
 	}
 

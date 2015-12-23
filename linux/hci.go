@@ -122,25 +122,25 @@ func (h *HCI) SetScanEnable(en bool, dup bool) error {
 	return h.c.SendAndCheckResp(
 		cmd.LESetScanEnable{
 			LEScanEnable:     btoi(en),
-			FilterDuplicates: btoi(dup),
+			FilterDuplicates: btoi(!dup),
 		}, []byte{0x00})
 }
 
 func (h *HCI) Connect(pd *PlatData) error {
 	h.c.Send(
 		cmd.LECreateConn{
-			LEScanInterval:        0x0004,     // N x 0.625ms
-			LEScanWindow:          0x0004,     // N x 0.625ms
-			InitiatorFilterPolicy: 0x00,       // white list not used
-			PeerAddressType:       0x00,       // public
-			PeerAddress:           pd.Address, //
-			OwnAddressType:        0x00,       // public
-			ConnIntervalMin:       0x0006,     // N x 0.125ms
-			ConnIntervalMax:       0x0006,     // N x 0.125ms
-			ConnLatency:           0x0000,     //
-			SupervisionTimeout:    0x000A,     // N x 10ms
-			MinimumCELength:       0x0000,     // N x 0.625ms
-			MaximumCELength:       0x0000,     // N x 0.625ms
+			LEScanInterval:        0x0004,         // N x 0.625ms
+			LEScanWindow:          0x0004,         // N x 0.625ms
+			InitiatorFilterPolicy: 0x00,           // white list not used
+			PeerAddressType:       pd.AddressType, // public or random
+			PeerAddress:           pd.Address,     //
+			OwnAddressType:        0x00,           // public
+			ConnIntervalMin:       0x0006,         // N x 0.125ms
+			ConnIntervalMax:       0x0006,         // N x 0.125ms
+			ConnLatency:           0x0000,         //
+			SupervisionTimeout:    0x000A,         // N x 10ms
+			MinimumCELength:       0x0000,         // N x 0.625ms
+			MaximumCELength:       0x0000,         // N x 0.625ms
 		})
 	return nil
 }
@@ -172,7 +172,7 @@ func (h *HCI) mainLoop() {
 		}
 		p := make([]byte, n)
 		copy(p, b)
-		go h.handlePacket(p)
+		h.handlePacket(p)
 	}
 }
 
@@ -188,7 +188,12 @@ func (h *HCI) handlePacket(b []byte) {
 	case typSCODataPkt:
 		err = fmt.Errorf("SCO packet not supported")
 	case typEventPkt:
-		err = h.e.Dispatch(b)
+		go func() {
+			err := h.e.Dispatch(b)
+			if err != nil {
+				log.Printf("hci: %s, [ % X]", err, b)
+			}
+		}()
 	case typVendorPkt:
 		err = fmt.Errorf("Vendor packet not supported")
 	default:
@@ -372,6 +377,10 @@ func (h *HCI) handleL2CAP(b []byte) error {
 	if !found {
 		// should not happen, just be cautious for now.
 		log.Printf("l2conn: got data for disconnected handle: 0x%04x", a.attr)
+		return nil
+	}
+	if len(a.b) < 4 {
+		log.Printf("l2conn: l2cap packet is too short/corrupt, length is %d", len(a.b))
 		return nil
 	}
 	cid := uint16(a.b[2]) | (uint16(a.b[3]) << 8)

@@ -1,6 +1,7 @@
 package gatt
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -215,6 +216,43 @@ func (p *peripheral) ReadCharacteristic(c *Characteristic) ([]byte, error) {
 	return b, nil
 }
 
+func (p *peripheral) ReadLongCharacteristic(c *Characteristic) ([]byte, error) {
+	// The spec says that a read blob request should fail if the characteristic
+	// is smaller than mtu - 1.  To simplify the API, the first read is done
+	// with a regular read request.  If the buffer received is equal to mtu -1,
+	// then we read the rest of the data using read blob.
+	firstRead, err := p.ReadCharacteristic(c)
+	if err != nil {
+		return nil, err
+	}
+	if len(firstRead) < int(p.mtu)-1 {
+		return firstRead, nil
+	}
+
+	var buf bytes.Buffer
+	buf.Write(firstRead)
+	off := uint16(len(firstRead))
+	for {
+		b := make([]byte, 5)
+		op := byte(attOpReadBlobReq)
+		b[0] = op
+		binary.LittleEndian.PutUint16(b[1:3], c.vh)
+		binary.LittleEndian.PutUint16(b[3:5], off)
+
+		b = p.sendReq(op, b)
+		b = b[1:]
+		if len(b) == 0 {
+			break
+		}
+		buf.Write(b)
+		off += uint16(len(b))
+		if len(b) < int(p.mtu)-1 {
+			break
+		}
+	}
+	return buf.Bytes(), nil
+}
+
 func (p *peripheral) WriteCharacteristic(c *Characteristic, value []byte, noRsp bool) error {
 	b := make([]byte, 3+len(value))
 	op := byte(attOpWriteReq)
@@ -225,7 +263,7 @@ func (p *peripheral) WriteCharacteristic(c *Characteristic, value []byte, noRsp 
 	binary.LittleEndian.PutUint16(b[1:3], c.vh)
 	copy(b[3:], value)
 
-	if !noRsp {
+	if noRsp {
 		p.sendCmd(op, b)
 		return nil
 	}
@@ -260,14 +298,14 @@ func (p *peripheral) WriteDescriptor(d *Descriptor, value []byte) error {
 	return nil
 }
 
-func (p *peripheral) SetNotifyValue(c *Characteristic,
+func (p *peripheral) setNotifyValue(c *Characteristic, flag uint16,
 	f func(*Characteristic, []byte, error)) error {
 	if c.cccd == nil {
 		return errors.New("no cccd") // FIXME
 	}
 	ccc := uint16(0)
 	if f != nil {
-		ccc = gattCCCNotifyFlag
+		ccc = flag
 		p.sub.subscribe(c.vh, func(b []byte, err error) { f(c, b, err) })
 	}
 	b := make([]byte, 5)
@@ -283,6 +321,16 @@ func (p *peripheral) SetNotifyValue(c *Characteristic,
 		p.sub.unsubscribe(c.vh)
 	}
 	return nil
+}
+
+func (p *peripheral) SetNotifyValue(c *Characteristic,
+	f func(*Characteristic, []byte, error)) error {
+	return p.setNotifyValue(c, gattCCCNotifyFlag, f)
+}
+
+func (p *peripheral) SetIndicateValue(c *Characteristic,
+	f func(*Characteristic, []byte, error)) error {
+	return p.setNotifyValue(c, gattCCCIndicateFlag, f)
 }
 
 func (p *peripheral) ReadRSSI() int {
@@ -348,7 +396,7 @@ func (p *peripheral) loop() {
 	// The default value is 672 bytes
 	buf := make([]byte, 672)
 
-	// Handling response or notification
+	// Handling response or notification/indication
 	for {
 		n, err := p.l2c.Read(buf)
 		if n == 0 || err != nil {
@@ -359,17 +407,39 @@ func (p *peripheral) loop() {
 		b := make([]byte, n)
 		copy(b, buf)
 
-		if b[0] != attOpHandleNotify {
+		if (b[0] != attOpHandleNotify) && (b[0] != attOpHandleInd) {
 			rspc <- b
 			continue
 		}
+
 		h := binary.LittleEndian.Uint16(b[1:3])
 		f := p.sub.fn(h)
 		if f == nil {
 			log.Printf("notified by unsubscribed handle")
 			// FIXME: terminate the connection?
-			continue
+		} else {
+			go f(b[3:], nil)
 		}
-		go f(b[3:], nil)
+
+		if b[0] == attOpHandleInd {
+			// write aknowledgement for indication
+			p.l2c.Write([]byte{attOpHandleCnf})
+		}
+
 	}
+}
+
+func (p *peripheral) SetMTU(mtu uint16) error {
+	b := make([]byte, 3)
+	op := byte(attOpMtuReq)
+	b[0] = op
+	binary.LittleEndian.PutUint16(b[1:3], uint16(mtu))
+
+	b = p.sendReq(op, b)
+	serverMTU := binary.LittleEndian.Uint16(b[1:3])
+	if serverMTU < mtu {
+		mtu = serverMTU
+	}
+	p.mtu = mtu
+	return nil
 }

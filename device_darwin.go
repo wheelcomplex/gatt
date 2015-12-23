@@ -1,6 +1,7 @@
 package gatt
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -9,6 +10,23 @@ import (
 	"time"
 
 	"github.com/paypal/gatt/xpc"
+)
+
+const (
+	peripheralDiscovered   = 37
+	peripheralConnected    = 38
+	peripheralDisconnected = 40
+	// below constants for Yosemite
+	rssiRead                   = 55
+	includedServicesDiscovered = 63
+	serviceDiscovered          = 56
+	characteristicsDiscovered  = 64
+	characteristicRead         = 71
+	characteristicWritten      = 72
+	notificationValueSet       = 74
+	descriptorsDiscovered      = 76
+	descriptorRead             = 79
+	descriptorWritten          = 80
 )
 
 type device struct {
@@ -55,10 +73,21 @@ func (d *device) Init(f func(Device, State)) error {
 	rsp := d.sendReq(1, xpc.Dict{
 		"kCBMsgArgName":    fmt.Sprintf("gopher-%v", time.Now().Unix()),
 		"kCBMsgArgOptions": xpc.Dict{"kCBInitOptionShowPowerAlert": 1},
-		"kCBMsgArgType":    1,
+		"kCBMsgArgType":    d.role,
 	})
 	d.stateChanged = f
 	go d.stateChanged(d, State(rsp.MustGetInt("kCBMsgArgState")))
+	return nil
+}
+
+func (d *device) Advertise(a *AdvPacket) error {
+	rsp := d.sendReq(8, xpc.Dict{
+		"kCBAdvDataAppleMfgData": a.b, // not a.Bytes(). should be slice
+	})
+
+	if res := rsp.MustGetInt("kCBMsgArgResult"); res != 0 {
+		return errors.New("FIXME: Advertise error")
+	}
 	return nil
 }
 
@@ -75,10 +104,24 @@ func (d *device) AdvertiseNameAndServices(name string, ss []UUID) error {
 }
 
 func (d *device) AdvertiseIBeaconData(data []byte) error {
-	rsp := d.sendReq(8, xpc.Dict{"kCBAdvDataAppleBeaconKey": data})
+	var utsname xpc.Utsname
+	xpc.Uname(&utsname)
+
+	var rsp xpc.Dict
+
+	if utsname.Release >= "14." {
+		l := len(data)
+		buf := bytes.NewBuffer([]byte{byte(l + 5), 0xFF, 0x4C, 0x00, 0x02, byte(l)})
+		buf.Write(data)
+		rsp = d.sendReq(8, xpc.Dict{"kCBAdvDataAppleMfgData": buf.Bytes()})
+	} else {
+		rsp = d.sendReq(8, xpc.Dict{"kCBAdvDataAppleBeaconKey": data})
+	}
+
 	if res := rsp.MustGetInt("kCBMsgArgResult"); res != 0 {
 		return errors.New("FIXME: Advertise error")
 	}
+
 	return nil
 }
 
@@ -308,8 +351,9 @@ func (d *device) respondToRequest(id int, args xpc.Dict) {
 		u := UUID{args.MustGetUUID("kCBMsgArgDeviceUUID")}
 		a := args.MustGetInt("kCBMsgArgAttributeID")
 		attr := d.attrs[a]
-		c := d.subscribers[u.String()]
-		c.stopNotify(attr)
+		if c := d.subscribers[u.String()]; c != nil {
+			c.stopNotify(attr)
+		}
 
 	case 23: // notificationSent
 	}
@@ -329,7 +373,7 @@ func (d *device) HandleXpcEvent(event xpc.Dict, err error) {
 
 	id := event.MustGetInt("kCBMsgId")
 	args := event.MustGetDict("kCBMsgArgs")
-	// log.Printf(">> %d, %v", id, args)
+	//log.Printf(">> %d, %v", id, args)
 
 	switch id {
 	case // device event
@@ -347,7 +391,7 @@ func (d *device) HandleXpcEvent(event xpc.Dict, err error) {
 		23: // Confirmation
 		d.respondToRequest(id, args)
 
-	case 37: // PeripheralDiscovered
+	case peripheralDiscovered:
 		xa := args.MustGetDict("kCBMsgArgAdvertisementData")
 		if len(xa) == 0 {
 			return
@@ -381,7 +425,7 @@ func (d *device) HandleXpcEvent(event xpc.Dict, err error) {
 			go d.peripheralDiscovered(&peripheral{id: xpc.UUID(u.b), d: d}, a, rssi)
 		}
 
-	case 38: // PeripheralConnected
+	case peripheralConnected:
 		u := UUID{args.MustGetUUID("kCBMsgArgDeviceUUID")}
 		p := &peripheral{
 			id:    xpc.UUID(u.b),
@@ -400,7 +444,7 @@ func (d *device) HandleXpcEvent(event xpc.Dict, err error) {
 			go d.peripheralConnected(p, nil)
 		}
 
-	case 40: // PeripheralDisconnected
+	case peripheralDisconnected:
 		u := UUID{args.MustGetUUID("kCBMsgArgDeviceUUID")}
 		d.plistmu.Lock()
 		p := d.plist[u.String()]
@@ -412,16 +456,16 @@ func (d *device) HandleXpcEvent(event xpc.Dict, err error) {
 		close(p.quitc)
 
 	case // Peripheral events
-		54, // RSSIRead
-		55, // ServiceDiscovered
-		62, // IncludedServiceDiscovered
-		63, // CharacteristicsDiscovered
-		70, // CharacteristicRead
-		71, // CharacteristicWritten
-		73, // NotifyValueSet
-		75, // DescriptorsDiscovered
-		78, // DescriptorRead
-		79: // DescriptorWritten
+		rssiRead,
+		serviceDiscovered,
+		includedServicesDiscovered,
+		characteristicsDiscovered,
+		characteristicRead,
+		characteristicWritten,
+		notificationValueSet,
+		descriptorsDiscovered,
+		descriptorRead,
+		descriptorWritten:
 
 		u := UUID{args.MustGetUUID("kCBMsgArgDeviceUUID")}
 		d.plistmu.Lock()
